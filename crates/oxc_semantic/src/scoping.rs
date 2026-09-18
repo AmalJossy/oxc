@@ -168,9 +168,10 @@ impl Default for Scoping {
 /// It takes `&mut self`, which guarantees exclusive access to `ScopingCell`. Therefore, no other code
 /// (on any thread) can simultaneously have access to the `Allocator` during a call to `with_dependent_mut`.
 ///
-/// `allocator_used_bytes` obtains an `&Allocator` reference internally, without taking `&mut self`.
-/// But it doesn't mutate the `Allocator` in any way, and it doesn't expose the `&Allocator` to user.
-/// By taking `&self`, it guarantees that `with_dependent_mut` cannot be called at the same time.
+/// `allocator_used_bytes` and `allocator_allocation_stats` obtain an `&Allocator` reference internally,
+/// without taking `&mut self`. They don't mutate the `Allocator` in any way, and don't expose the
+/// `&Allocator` to user. By taking `&self`, they guarantee that `with_dependent_mut` cannot be called
+/// at the same time.
 ///
 /// ### `Send`
 ///
@@ -238,9 +239,9 @@ mod scoping_cell {
             // time as `with_dependent_mut` (or within `with_dependent_mut`'s callback closure).
             //
             // Therefore, the only other references to `&Allocator` which can be held at this point
-            // are in other calls to this method on other threads.
-            // `used_bytes` does not perform allocations, or mutate the `Allocator` in any way.
-            // So it's fine if 2 threads are calling this method simultaneously, because they're
+            // are in other calls to this method or `allocator_allocation_stats` on other threads.
+            // Neither accessor performs allocations or mutates the `Allocator` in any way.
+            // So it's fine if 2 threads are calling these methods simultaneously, because they're
             // both performing read-only actions.
             //
             // Another thread could simultaneously hold a reference to `&ScopingInner` via `borrow_dependent`,
@@ -250,6 +251,17 @@ mod scoping_cell {
             // So there's no way for simultaneous usage of `borrow_dependent` on another thread to break
             // the guarantee that no mutation of the `Allocator` can occur during this method.
             self.0.borrow_owner().used_bytes()
+        }
+
+        /// Get the number of allocations and reallocations made in the internal arena.
+        #[cfg(all(feature = "track_allocations", not(feature = "disable_track_allocations")))]
+        #[expect(clippy::unnecessary_safety_comment)]
+        #[inline(always)]
+        pub fn allocator_allocation_stats(&self) -> (usize, usize) {
+            // SAFETY: Like `allocator_used_bytes`, this only reads the allocator and does not expose
+            // it to the caller. The shared borrow prevents simultaneous arena mutation through
+            // `with_dependent_mut`, so reading the counters concurrently is safe.
+            self.0.borrow_owner().get_allocation_stats()
         }
 
         /// Consume [`ScopingCell`] and return the [`Allocator`] it contains.
@@ -296,6 +308,18 @@ pub struct ScopingInner<'cell> {
     pub(crate) bindings: IndexVec<ScopeId, Bindings<'cell>>,
 
     pub(crate) root_unresolved_references: UnresolvedReferences<'cell>,
+}
+
+impl Scoping {
+    /// Get the number of allocations and reallocations made in scoping's internal arena.
+    ///
+    /// Only used by `tasks/track_memory_allocations`.
+    #[cfg(all(feature = "track_allocations", not(feature = "disable_track_allocations")))]
+    #[doc(hidden)]
+    #[inline]
+    pub fn allocator_allocation_stats(&self) -> (usize, usize) {
+        self.cell.allocator_allocation_stats()
+    }
 }
 
 // Symbol Table Methods

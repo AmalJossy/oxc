@@ -365,9 +365,18 @@ pub fn run() -> Result<(), io::Error> {
 
         parser_entries.push((file, parser_stats));
 
-        let ((), semantic_stats) = record_stats_in(&allocator, || {
-            let _ = SemanticBuilder::new().with_enum_eval(true).build(&parsed.program);
+        let (semantic_arena, mut semantic_stats) = record_stats_in(&allocator, || {
+            let semantic = SemanticBuilder::new().with_enum_eval(true).build(&parsed.program);
+            // Scoping owns a separate arena; the parser allocator does not track its allocations.
+            #[cfg(not(feature = "is_all_features"))]
+            let (allocs, reallocs) = semantic.semantic.scoping().allocator_allocation_stats();
+            #[cfg(feature = "is_all_features")]
+            let (allocs, reallocs) = (0, 0);
+            // Keep destruction inside the measured stage, so heap deallocations are still counted.
+            drop(semantic);
+            ArenaCounters { allocs, reallocs }
         });
+        semantic_stats.counters.arena = semantic_arena;
 
         semantic_entries.push((file, semantic_stats));
 
@@ -443,8 +452,8 @@ impl Counters {
     /// allocations made during a specific operation without needing to reset the counters.
     ///
     /// Arena chunk operations need no correction here: they are already excluded at the
-    /// source by [`TrackedAllocator`] (see [`is_chunk_operation`]). All remaining counters
-    /// grow on element counts, which are identical on all platforms.
+    /// source by [`TrackedAllocator`] (see [`is_chunk_operation`]). The remaining counts track
+    /// allocator operations rather than platform-dependent chunk growth.
     fn diff_since(&self, prev: &Self) -> Self {
         Self {
             heap: HeapCounters {
@@ -511,7 +520,7 @@ struct Metric {
 /// and rendered.
 #[derive(Clone, Copy)]
 enum MetricKind {
-    /// A count, identical on every platform. Snapshotted exactly.
+    /// A count, expected to be identical across platforms. Snapshotted exactly.
     Count,
     /// A byte total, rendered with a human-readable size comment.
     ///

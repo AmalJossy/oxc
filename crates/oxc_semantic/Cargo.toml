@@ -51,6 +51,10 @@ serde_json = { workspace = true }
 
 [features]
 default = []
+# Allocation tracking is only used by `tasks/track_memory_allocations`.
+track_allocations = ["oxc_allocator/track_allocations"]
+# Disable tracking under `--all-features`, matching `oxc_allocator`.
+disable_track_allocations = ["oxc_allocator/disable_track_allocations"]
 cfg = ["dep:oxc_cfg"]
 jsdoc = ["dep:oxc_jsdoc"]
 linter = ["jsdoc"]
