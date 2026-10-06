@@ -45,6 +45,15 @@ impl Codegen<'_> {
         self.print_string_body(s.value.as_str(), s.lone_surrogates, Some(Quote::Backtick), true);
     }
 
+    /// Print an untagged template quasi from its cooked value, re-escaped for a template context.
+    ///
+    /// Only valid for untagged templates: their raw text is unobservable, so `\u{1F680}`
+    /// can be printed as `🚀`, `\x41` as `A`, `\n` as a literal newline, etc.
+    /// Does not print any quote characters.
+    pub(crate) fn print_template_quasi_cooked(&mut self, cooked: &str, lone_surrogates: bool) {
+        self.print_string_contents(cooked, lone_surrogates, Some(Quote::Backtick), true);
+    }
+
     pub(super) fn print_string_impl(
         &mut self,
         s: &str,
@@ -68,10 +77,7 @@ impl Codegen<'_> {
         self.print_string_body(s, lone_surrogates, quote, allow_backtick);
     }
 
-    /// Print the contents of a string, and its closing quote.
-    ///
-    /// `quote` is `None` where it has yet to be chosen - it is then calculated from the contents,
-    /// and the opening quote printed, when the first character needing an escape is found.
+    // Thin wrapper around print_string_contents
     fn print_string_body(
         &mut self,
         s: &str,
@@ -79,6 +85,23 @@ impl Codegen<'_> {
         quote: Option<Quote>,
         allow_backtick: bool,
     ) {
+        let quote = self.print_string_contents(s, lone_surrogates, quote, allow_backtick);
+        // Print closing quote.
+        quote.print(self);
+    }
+
+    /// Print the contents of a string (and its opening quote, if `quote` is `None`),
+    /// but not the closing quote. Returns the quote that was chosen.
+    ///
+    /// `quote` is `None` where it has yet to be chosen - it is then calculated from the contents,
+    /// and the opening quote printed, when the first character needing an escape is found.
+    fn print_string_contents(
+        &mut self,
+        s: &str,
+        lone_surrogates: bool,
+        quote: Option<Quote>,
+        allow_backtick: bool,
+    ) -> Quote {
         // Loop through bytes, looking for any which need to be escaped.
         // String is written to buffer in chunks.
         let bytes = s.as_bytes().iter();
@@ -121,10 +144,8 @@ impl Codegen<'_> {
         // Flush any remaining bytes
         state.flush(self);
 
-        // Print closing quote.
         // SAFETY: `flush` calls `calculate_quote` which ensures `state.quote` is `Some`.
-        let quote = unsafe { state.quote.unwrap_unchecked() };
-        quote.print(self);
+        unsafe { state.quote.unwrap_unchecked() }
     }
 }
 

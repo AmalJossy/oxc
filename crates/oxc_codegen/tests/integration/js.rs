@@ -1177,3 +1177,23 @@ fn template_literal_dollar_escapes() {
         );
     }
 }
+
+#[test]
+fn unescape_untagged_template_quasis() {
+    // the issue
+    test_minify(r"`${a}\u{1F680}`;", "`${a}🚀`;");
+    test_minify(r"`${a}\x41`;", "`${a}A`;");
+    // escaped newline becomes a literal newline (shorter)
+    test_minify(r"`${a}\n`;", "`${a}\n`;");
+    // line continuation disappears
+    test_minify("`a${b}\\\nc`;", "`a${b}c`;");
+    // tagged templates keep raw text
+    test_minify(r"String.raw`${a}\u{1F680}`;", r"String.raw`${a}\u{1F680}`;");
+    // `${` must stay escaped, a lone `$` must not
+    test_minify(r"`\${a}${b}`;", r"`\${a}${b}`;");
+    test_minify(r"`\$a${b}`;", "`$a${b}`;");
+    // NUL followed by a digit
+    test_minify(r"`\x001${a}`;", r"`\x001${a}`;");
+    // lone surrogate survives
+    test_minify(r"`\uD800${a}`;", r"`\ud800${a}`;");
+}
