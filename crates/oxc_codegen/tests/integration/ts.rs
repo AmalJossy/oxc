@@ -148,7 +148,7 @@ fn tsx() {
 #[test]
 fn ts() {
     let cases = [
-        "let x: string = `\\x01`;",
+        "let x: string = `\\x41`;",
         "function foo<T extends string>(x: T, y: string, ...restOfParams: Omit<T, 'x'>): T {\n\treturn x;\n}",
         "let x: string[] = ['abc', 'def', 'ghi'];",
         "let x: Array<string> = ['abc', 'def', 'ghi',];",

@@ -463,6 +463,8 @@ impl<'a> Codegen<'a> {
             && !tagged
             && raw.contains('\\')
             && let Some(cooked) = quasi.value.cooked
+            // The string printer would escape `${` as `\${`; the raw path emits the equivalent `$\{`.
+            && !cooked.as_str().contains("${")
         {
             self.print_template_quasi_cooked(cooked.as_str(), quasi.lone_surrogates);
         } else {

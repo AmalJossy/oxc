@@ -1194,6 +1194,8 @@ fn unescape_untagged_template_quasis() {
     test_minify(r"`\$a${b}`;", "`$a${b}`;");
     // NUL followed by a digit
     test_minify(r"`\x001${a}`;", r"`\x001${a}`;");
+    // control characters are printed literally
+    test_minify(r"`${a}\x01`;", "`${a}\u{1}`;");
     // lone surrogate survives
     test_minify(r"`\uD800${a}`;", r"`\ud800${a}`;");
 }
