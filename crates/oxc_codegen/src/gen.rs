@@ -2360,7 +2360,7 @@ impl Gen for TemplateLiteral<'_> {
         debug_assert_eq!(self.quasis.len(), self.expressions.len() + 1);
         let (first_quasi, remaining_quasis) = self.quasis.split_first().unwrap();
         let tagged = ctx.contains(Context::TAGGED_TEMPLATE);
-        p.print_template_quasi_raw(first_quasi.value.raw.as_str(), tagged);
+        p.print_template_quasi(first_quasi, tagged);
         for (expr, quasi) in self.expressions.iter().zip(remaining_quasis) {
             p.print_str("${");
             p.print_leading_comments_before_expression(expr);
@@ -2368,7 +2368,7 @@ impl Gen for TemplateLiteral<'_> {
             p.print_expression(expr);
             p.print_ascii_byte(b'}');
             p.add_source_mapping(quasi.span);
-            p.print_template_quasi_raw(quasi.value.raw.as_str(), tagged);
+            p.print_template_quasi(quasi, tagged);
         }
         p.print_ascii_byte(b'`');
     }

@@ -450,6 +450,28 @@ impl<'a> Codegen<'a> {
         unsafe { self.code.print_bytes_unchecked(&bytes) };
     }
 
+    /// Print a template literal quasi.
+    ///
+    /// When minifying an untagged template, the raw text is unobservable, so print the cooked
+    /// value re-escaped for a template context. Quasis without any backslash are already
+    /// minimal, so their raw text is kept as-is to avoid growing literal LS/PS/NBSP/control
+    /// characters into escapes.
+    #[inline]
+    pub(crate) fn print_template_quasi(&mut self, quasi: &TemplateElement<'_>, tagged: bool) {
+        let raw = quasi.value.raw.as_str();
+        if self.options.minify
+            && !tagged
+            && raw.contains('\\')
+            && let Some(cooked) = quasi.value.cooked
+            // The string printer would escape `${` as `\${`; the raw path emits the equivalent `$\{`.
+            && !cooked.as_str().contains("${")
+        {
+            self.print_template_quasi_cooked(cooked.as_str(), quasi.lone_surrogates);
+        } else {
+            self.print_template_quasi_raw(raw, tagged);
+        }
+    }
+
     /// Print a template literal quasi's raw text, removing redundant dollar escapes when minifying
     /// untagged templates. Only untagged templates are escaped under
     /// [CodegenOptions::ascii_only]: a tag function (e.g. `String.raw`) can observe the raw

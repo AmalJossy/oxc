@@ -182,6 +182,18 @@ fn template_literals() {
 }
 
 #[test]
+fn minified_template_cooked_unescape() {
+    // Cooked path: astral char is re-escaped as a surrogate pair, never printed raw.
+    test_minify("`${a}\\u{1F680}`;", "`${a}\\u{1F680}`;");
+    // BMP non-ASCII written as an escape stays ASCII.
+    test_minify("`${a}\\u00E9`;", "`${a}\\u00E9`;");
+    // Escape that becomes plain ASCII is unescaped.
+    test_minify("`${a}\\x41`;", "`${a}A`;");
+    // Tagged templates keep raw text, including under ascii_only.
+    test_minify("String.raw`${a}\\u{1F680}`;", "String.raw`${a}\\u{1F680}`;");
+}
+
+#[test]
 fn tagged_template_is_not_escaped() {
     // Asserted separately because the expected output is intentionally not ASCII.
     test_options("let x = tag`café ${`naïve`}`;", "let x = tag`café ${`na\\u00EFve`}`;\n", ascii());
