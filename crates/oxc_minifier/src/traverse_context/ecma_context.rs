@@ -364,6 +364,7 @@ impl<'a> TraverseCtx<'a, MinifierState<'a>> {
         let symbol_value = SymbolValue {
             initialized_constant,
             allow_constant_inlining: true,
+            iife_alias: None,
             implicit_undefined,
             references,
             kind: if has_multiple_value_declarations { FreshValueKind::None } else { kind },

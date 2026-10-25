@@ -644,7 +644,7 @@ fn test_fold_iife() {
     test_same("((...{x}) => {})(a)");
     test_same("(async () => {})(a)");
     test_same("(function*() {})(a)");
-    test_same("(() => { foo() })(a)");
+    test("(() => { foo() })(a)", "a, foo()");
     // Directive-only body: in module source the redundant `'use strict'` is
     // stripped upstream, then the empty-body path drops the wrapper.
     test("(function() { 'use strict' })(a)", "a;");

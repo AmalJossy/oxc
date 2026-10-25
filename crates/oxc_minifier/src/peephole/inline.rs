@@ -1,20 +1,29 @@
 use crate::generated::ancestor::Ancestor;
+use oxc_allocator::{FromIn, GetAllocator};
 use oxc_ast::ast::*;
 use oxc_ecmascript::constant_evaluation::{ConstantEvaluation, ConstantValue};
 use oxc_span::GetSpan;
-use oxc_syntax::symbol::SymbolId;
+use oxc_syntax::{reference::ReferenceFlags, scope::ScopeId, symbol::SymbolId};
 
 use crate::TraverseCtx;
 use crate::symbol_value::FreshValueKind;
+use crate::traverse_context::BoundIdentifier;
 
 use super::PeepholeOptimizations;
 
 impl<'a> PeepholeOptimizations {
     /// Seed parameter constants before traversing an immediately invoked function.
     /// The arguments stay at the call site, preserving their evaluation order.
+    ///
+    /// When `substitute_iife_call` can then remove an arrow wrapper, bare reads
+    /// may also take the constant or the identifier argument:
+    /// `(n => n ? n + 1 : 0)(v)` -> `v ? v + 1 : 0`.
     pub fn init_iife_parameter_values(call: &CallExpression<'a>, ctx: &mut TraverseCtx<'a>) {
-        let params = match &call.callee {
-            Expression::ArrowFunctionExpression(arrow) => &arrow.params,
+        let (params, arrow_scope_id) = match &call.callee {
+            Expression::ArrowFunctionExpression(arrow) => (
+                &arrow.params,
+                Self::arrow_iife_can_be_removed(call, ctx).then(|| arrow.scope_id()),
+            ),
             Expression::FunctionExpression(function) => {
                 // Sloppy functions expose mapped arguments and caller introspection.
                 // A referenced function name can escape or recurse with other arguments.
@@ -26,7 +35,7 @@ impl<'a> PeepholeOptimizations {
                 {
                     return;
                 }
-                &function.params
+                (&function.params, None)
             }
             _ => return,
         };
@@ -40,20 +49,93 @@ impl<'a> PeepholeOptimizations {
         {
             return;
         }
-        for (param, argument) in params.items.iter().zip(&call.arguments) {
+        let mut wrapper_can_be_removed = arrow_scope_id.is_some();
+        for (index, param) in params.items.iter().enumerate() {
             let BindingPattern::BindingIdentifier(id) = &param.pattern else { unreachable!() };
             let symbol_id = id.symbol_id();
-            // A body declaration can replace a parameter before its first read.
-            if !ctx.scoping().symbol_redeclarations(symbol_id).is_empty() {
+            if ctx.scoping().symbol_is_unused(symbol_id) {
                 continue;
             }
-            if let Some(value) = argument.to_expression().evaluate_value(ctx) {
+            let argument = call.arguments.get(index);
+            // A body declaration can replace a parameter before its first read.
+            if argument.is_none() || !ctx.scoping().symbol_redeclarations(symbol_id).is_empty() {
+                wrapper_can_be_removed = false;
+                continue;
+            }
+            let argument = argument.unwrap().to_expression();
+            if let Some(value) = argument.evaluate_value(ctx) {
                 // `init_value` and its consumers reject direct eval and writes,
                 // including writes from nested closures.
-                ctx.init_value(symbol_id, Some(value), FreshValueKind::None, false, false)
-                    .allow_constant_inlining = false;
+                let value =
+                    ctx.init_value(symbol_id, Some(value), FreshValueKind::None, false, false);
+                wrapper_can_be_removed &= value.can_inline_initialized_constant();
+            } else if let Some(alias) = arrow_scope_id
+                .and_then(|scope_id| Self::iife_parameter_alias(symbol_id, argument, scope_id, ctx))
+            {
+                ctx.init_value(symbol_id, None, FreshValueKind::None, false, false).iife_alias =
+                    Some(alias);
+            } else {
+                wrapper_can_be_removed = false;
             }
         }
+        // Bare reads are replaced only when the wrapper goes away. Otherwise the
+        // argument stays at the call site and the replacement is a second copy.
+        if wrapper_can_be_removed {
+            return;
+        }
+        for param in &params.items {
+            let BindingPattern::BindingIdentifier(id) = &param.pattern else { unreachable!() };
+            if let Some(value) = ctx.state.symbols.value_mut(id.symbol_id()) {
+                value.allow_constant_inlining = false;
+                value.iife_alias = None;
+            }
+        }
+    }
+
+    /// The argument identifier that can replace each read of an arrow IIFE
+    /// parameter, read at the same time with the same value.
+    fn iife_parameter_alias(
+        param_symbol_id: SymbolId,
+        argument: &Expression<'a>,
+        arrow_scope_id: ScopeId,
+        ctx: &TraverseCtx<'a>,
+    ) -> Option<SymbolId> {
+        let Expression::Identifier(ident) = argument else { return None };
+        // An unresolved global can have a getter or throw a `ReferenceError`.
+        // `identifier_read_blocks_reorder` also rejects writes, imports,
+        // script-root globals and closed-over lexicals.
+        let symbol_id = ctx.scoping().get_reference(ident.reference_id()).symbol_id()?;
+        if Self::identifier_read_blocks_reorder(ident, ctx) {
+            return None;
+        }
+        let scoping = ctx.scoping();
+        let argument_scope_id = scoping.symbol_scope_id(symbol_id);
+        // Direct eval anywhere in the argument's scope can write it, write the
+        // parameter or declare a shadowing `var`, all with no resolved reference.
+        // The flag is copied to every enclosing scope, so this covers the arrow.
+        if scoping.scope_flags(argument_scope_id).contains_direct_eval() {
+            return None;
+        }
+        // In `with (o)`, each read can call a getter for `o.v`.
+        if scoping
+            .scope_ancestors(ctx.current_scope_id())
+            .take_while(|&scope_id| scope_id != argument_scope_id)
+            .any(|scope_id| scoping.scope_flags(scope_id).is_with())
+        {
+            return None;
+        }
+        scoping
+            .get_resolved_references(param_symbol_id)
+            .all(|reference| {
+                !reference.is_write()
+                    // A nested function or class field initializer can run later,
+                    // e.g. after a hoisted `var` is assigned. A removable arrow body
+                    // has no other nested scopes, so require the arrow scope itself.
+                    && reference.scope_id() == arrow_scope_id
+                    // A body or sibling-parameter binding can shadow the argument.
+                    && scoping.find_binding(reference.scope_id(), ident.name) == Some(symbol_id)
+            })
+            .then_some(symbol_id)
     }
 
     pub fn init_symbol_value(decl: &VariableDeclarator<'a>, ctx: &mut TraverseCtx<'a>) {
@@ -340,6 +422,19 @@ impl<'a> PeepholeOptimizations {
         let Some(symbol_value) = ctx.state.symbols.value(symbol_id) else {
             return;
         };
+        if let Some(alias) = symbol_value.iife_alias {
+            // The wrapper and its argument go away in a later pass. Until then,
+            // the new read must count, or a single-use substitution can move the
+            // argument's initializer into the argument and leave this read dangling.
+            if let Some(value) = ctx.state.symbols.value_mut(alias) {
+                value.references.record(ReferenceFlags::Read);
+            }
+            let name = Ident::from_in(ctx.scoping().symbol_name(alias), ctx.allocator());
+            let new_expr =
+                BoundIdentifier::new(name, alias).create_spanned_read_expression(expr.span(), ctx);
+            ctx.replace_expression(expr, new_expr);
+            return;
+        }
         if !symbol_value.can_inline_initialized_constant() {
             return;
         }

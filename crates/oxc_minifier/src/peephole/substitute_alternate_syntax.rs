@@ -1874,106 +1874,150 @@ impl<'a> PeepholeOptimizations {
     /// - Simplifies single-expression non-async arrow function IIFEs (e.g., `(() => foo())()` to `foo()`).
     /// - Converts arrow function IIFEs that return void or execute one expression
     ///   (e.g., `(() => { foo() })()` or `(() => { return foo() })()`) into simpler expressions.
+    /// - Does the same for an arrow whose parameters are all unused, and keeps
+    ///   the arguments that have side effects (e.g., `(x => 1)(a())` to `(a(), 1)`).
     pub fn substitute_iife_call(e: &mut Expression<'a>, ctx: &mut TraverseCtx<'a>) {
         let Expression::CallExpression(call_expr) = e else { return };
+        let call_expr: &mut CallExpression<'a> = call_expr;
 
         if !call_expr.callee.is_function() {
             return;
         }
 
-        if !call_expr.arguments.is_empty() {
-            Self::substitute_empty_body_iife_call_with_args(e, ctx);
+        if call_expr.arguments.is_empty() {
+            let is_empty_iife = match &call_expr.callee {
+                Expression::FunctionExpression(f) => {
+                    f.params.is_empty()
+                        && f.body.as_ref().is_some_and(|body| body.is_empty())
+                        // ignore async/generator if a return value is not used
+                        && ((!f.r#async && !f.generator) || Self::is_expression_result_unused(ctx))
+                }
+                Expression::ArrowFunctionExpression(f) => {
+                    f.params.is_empty()
+                        && f.body.is_empty()
+                        // ignore async if a return value is not used
+                        && (!f.r#async || Self::is_expression_result_unused(ctx))
+                }
+                _ => false,
+            };
+
+            if is_empty_iife {
+                // Replace "(() => {})()" with "undefined"
+                // Replace "(function () => { return })()" with "undefined"
+                let new_value = Expression::new_void_0(call_expr.span, ctx);
+                ctx.replace_expression(e, new_value);
+                return;
+            }
+        }
+
+        if let Some(new_value) = Self::take_unused_params_arrow_iife_body(call_expr, ctx) {
+            // Replace "(x => 1)(a, b)" with "(a, b, 1)"
+            let span = call_expr.span;
+            let args = Self::fold_arguments_into_needed_expressions(&mut call_expr.arguments, ctx);
+            let new_value = if args.is_empty() {
+                new_value
+            } else {
+                let args = Expression::new_sequence_expression(span, args, ctx);
+                Self::join_sequence(span, args, new_value, ctx)
+            };
+            ctx.replace_expression(e, new_value);
             return;
         }
 
-        let is_empty_iife = match &call_expr.callee {
-            Expression::FunctionExpression(f) => {
-                f.params.is_empty()
-                    && f.body.as_ref().is_some_and(|body| body.is_empty())
-                    // ignore async/generator if a return value is not used
-                    && ((!f.r#async && !f.generator) || Self::is_expression_result_unused(ctx))
-            }
-            Expression::ArrowFunctionExpression(f) => {
-                f.params.is_empty()
-                    && f.body.is_empty()
-                    // ignore async if a return value is not used
-                    && (!f.r#async || Self::is_expression_result_unused(ctx))
-            }
-            _ => false,
-        };
+        if !call_expr.arguments.is_empty() {
+            Self::substitute_empty_body_iife_call_with_args(e, ctx);
+        }
+    }
 
-        if is_empty_iife {
-            // Replace "(() => {})()" with "undefined"
-            // Replace "(function () => { return })()" with "undefined"
-            let new_value = Expression::new_void_0(call_expr.span, ctx);
-            ctx.replace_expression(e, new_value);
-            return;
+    /// Take the result of a non-async arrow IIFE whose parameters are all
+    /// unused plain identifiers. The caller still owns the arguments.
+    ///
+    /// - `(() => foo())()` to `foo()`.
+    /// - `(() => { foo() })()` to `(foo(), undefined)`.
+    /// - `(() => { return foo() })()` to `foo()`.
+    fn take_unused_params_arrow_iife_body(
+        call_expr: &mut CallExpression<'a>,
+        ctx: &TraverseCtx<'a>,
+    ) -> Option<Expression<'a>> {
+        if !Self::arrow_iife_can_be_removed(call_expr, ctx) {
+            return None;
+        }
+        let Expression::ArrowFunctionExpression(f) = &mut call_expr.callee else { return None };
+        if !Self::iife_params_are_unused(&f.params, ctx) {
+            return None;
         }
 
         // The callee here is always a function/arrow literal, so
         // `manual_pure_functions` (which matches named paths like `styled`)
         // can never apply — only an explicit `/* @__PURE__ */` annotation can.
         let is_pure = call_expr.pure && ctx.annotations();
-
-        if let Expression::ArrowFunctionExpression(f) = &mut call_expr.callee
-            && !f.r#async
-            && !f.params.has_parameter()
-        {
-            if let Some(expr) = f.get_expression_mut() {
-                // Replace "(() => foo())()" with "foo()"
-                let new_value = if is_pure && Self::is_expression_result_unused(ctx) {
-                    Expression::new_void_0(call_expr.span, ctx)
-                } else if let Some(taken) = Self::try_take_iife_body(expr, is_pure, ctx) {
-                    // Replace "(() => o.f)()()" with "(0, o.f)()"
-                    Self::preserve_indirect_access_if_needed(call_expr.span, taken, ctx)
-                } else {
-                    return;
-                };
-                ctx.replace_expression(e, new_value);
-                return;
-            }
-            let Some(body) = f.get_function_body_mut() else { return };
-            if body.statements.len() != 1 || !body.directives.is_empty() {
-                return;
-            }
-            match &mut body.statements[0] {
-                Statement::ExpressionStatement(expr_stmt) => {
-                    // Replace "(() => { foo() })()" with "(foo(), undefined)"
-                    let new_value = if is_pure && Self::is_expression_result_unused(ctx) {
-                        Expression::new_void_0(call_expr.span, ctx)
-                    } else if let Some(taken) =
-                        Self::try_take_iife_body(&mut expr_stmt.expression, is_pure, ctx)
-                    {
-                        Self::join_sequence(
-                            expr_stmt.span,
-                            taken,
-                            Expression::new_void_0(call_expr.span, ctx),
-                            ctx,
-                        )
-                    } else {
-                        return;
-                    };
-
-                    ctx.replace_expression(e, new_value);
-                }
-                Statement::ReturnStatement(ret_stmt) => {
-                    if let Some(argument) = &mut ret_stmt.argument {
-                        // Replace "(() => { return foo() })()" with "foo()"
-                        let new_value = if is_pure && Self::is_expression_result_unused(ctx) {
-                            Expression::new_void_0(call_expr.span, ctx)
-                        } else if let Some(taken) = Self::try_take_iife_body(argument, is_pure, ctx)
-                        {
-                            // Replace "(() => { return o.f })()()" with "(0, o.f)()"
-                            Self::preserve_indirect_access_if_needed(call_expr.span, taken, ctx)
-                        } else {
-                            return;
-                        };
-                        ctx.replace_expression(e, new_value);
-                    }
-                }
-                _ => {}
-            }
+        let span = call_expr.span;
+        if is_pure && Self::is_expression_result_unused(ctx) {
+            return Some(Expression::new_void_0(span, ctx));
         }
+
+        if let Some(expr) = f.get_expression_mut() {
+            // Replace "(() => o.f)()()" with "(0, o.f)()"
+            let taken = Self::try_take_iife_body(expr, is_pure, ctx)?;
+            return Some(Self::preserve_indirect_access_if_needed(span, taken, ctx));
+        }
+        match &mut f.get_function_body_mut()?.statements[0] {
+            Statement::ExpressionStatement(expr_stmt) => {
+                let taken = Self::try_take_iife_body(&mut expr_stmt.expression, is_pure, ctx)?;
+                Some(Self::join_sequence(
+                    expr_stmt.span,
+                    taken,
+                    Expression::new_void_0(span, ctx),
+                    ctx,
+                ))
+            }
+            Statement::ReturnStatement(ret_stmt) => {
+                // Replace "(() => { return o.f })()()" with "(0, o.f)()"
+                let taken = Self::try_take_iife_body(ret_stmt.argument.as_mut()?, is_pure, ctx)?;
+                Some(Self::preserve_indirect_access_if_needed(span, taken, ctx))
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether `substitute_iife_call` can remove this arrow IIFE wrapper once
+    /// its parameters are unused. IIFE parameter inlining checks this first,
+    /// so that an argument never gets a second copy in a wrapper that stays.
+    pub(super) fn arrow_iife_can_be_removed(
+        call_expr: &CallExpression<'a>,
+        ctx: &TraverseCtx<'a>,
+    ) -> bool {
+        let Expression::ArrowFunctionExpression(f) = &call_expr.callee else { return false };
+        if f.r#async {
+            return false;
+        }
+        // A needed argument would move out of the pure call and lose the annotation.
+        if call_expr.pure
+            && ctx.annotations()
+            && call_expr
+                .arguments
+                .iter()
+                .any(|arg| arg.is_spread() || arg.to_expression().may_have_side_effects(ctx))
+        {
+            return false;
+        }
+        let Some(body) = f.get_function_body() else { return true };
+        body.directives.is_empty()
+            && match body.statements.as_slice() {
+                [Statement::ExpressionStatement(_)] => true,
+                [Statement::ReturnStatement(ret)] => ret.argument.is_some(),
+                _ => false,
+            }
+    }
+
+    /// Whether every parameter is a plain identifier with no reference left.
+    fn iife_params_are_unused(params: &FormalParameters<'a>, ctx: &TraverseCtx<'a>) -> bool {
+        params.rest.is_none()
+            && params.items.iter().all(|param| {
+                param.initializer.is_none()
+                    && matches!(&param.pattern, BindingPattern::BindingIdentifier(id)
+                        if Self::symbol_is_unused_by_count(id.symbol_id(), ctx))
+            })
     }
 
     /// `(() => {})(a, b)` → `(a, b, void 0)` — drop the wrapper when the body

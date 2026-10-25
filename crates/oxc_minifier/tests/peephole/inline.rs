@@ -18,27 +18,83 @@ fn inline_constant_iife_arguments() {
     test_smallest("(x => x + 1n)(1n);", "");
 
     // Parameter facts also reach nested closures, respecting shadowing.
-    test_smallest("use((x => () => x + 1)(1));", "use((x => () => 2)(1));");
-    test_smallest("use((x => x + (x => x + 1)(2))(1));", "use((x => x + (x => 3)(2))(1));");
-    // Recording the argument must not duplicate it at a bare parameter read.
+    test_smallest("use((x => () => x + 1)(1));", "use(() => 2);");
+    test_smallest("use((x => x + (x => x + 1)(2))(1));", "use(4);");
+    // A single read takes the argument once the wrapper goes away.
     test_smallest(
         "(x => effect(x))('a long string with many characters');",
-        "(x => effect(x))('a long string with many characters');",
+        "effect('a long string with many characters');",
+    );
+    // Recording the argument must not duplicate it while the wrapper stays.
+    test_smallest(
+        "(function (x) { a(); b(x) })('a long string with many characters');",
+        "(function (x) { a(), b(x) })('a long string with many characters');",
+    );
+    test_smallest(
+        "((x, y) => effect(x, y, y))('a long string with many characters', f());",
+        "((x, y) => effect(x, y, y))('a long string with many characters', f());",
+    );
+}
+
+/// <https://github.com/oxc-project/oxc/issues/27381>
+#[test]
+fn substitute_iife_arguments() {
+    test_smallest("export const t = ((n) => n * 2 + n)(18);", "export const t = 54;");
+    test_smallest(
+        "export function g(v) { return '<b>' + ((n) => n ? n + ' B' : '')(v) + '</b>'; }",
+        "export function g(v) { return '<b>' + (v ? v + ' B' : '') + '</b>'; }",
+    );
+    test_smallest(
+        "export function g(v) { const fmt = (n) => { if (!n) return ''; return n + ' B'; }; return '<b>' + fmt(v) + '</b>'; }",
+        "export function g(v) { return '<b>' + (v ? v + ' B' : '') + '</b>'; }",
+    );
+    test_smallest("function g(v) { return (x => () => x)(v) } g(1);", "");
+    test_smallest("use(/* @__PURE__ */ (x => f())(1));", "use(/* @__PURE__ */ f());");
+    // An alias read counts, so the initializer does not move into the argument.
+    test_smallest(
+        "export function g() { const v = f(); return (x => x + x)(v) }",
+        "export function g() { let v = f(); return v + v }",
+    );
+
+    let options = CompressOptions::smallest();
+    for source in [
+        // The argument must run one time only.
+        "use((n => n + n)(f()));",
+        // An unresolved global can have a getter or throw.
+        "use((x => x + x)(globalVar));",
+        // A nested function can run after a hoisted `var` is assigned.
+        "use((x => () => x)(v)); var v = 1;",
+        // Body and sibling-parameter bindings shadow the argument.
+        "export function g(v) { return (x => class v { static y = [x, v] })(v) }",
+        "export function g(v) { return ((a, v) => a + v)(v, 1) }",
+        // The argument can change.
+        "export function g(v) { return v = h(), (x => x + x)(v) }",
+        "import { v } from 'm'; use((x => x + x)(v));",
+        // Direct eval can write the parameter or the argument.
+        "export function g(v) { return (x => (eval('x = 2'), f(x)))(v) }",
+        "export function g(v) { const h = () => eval('v = 2'); return (x => (h(), x))(v) }",
+        // A class field initializer runs later, at construction time.
+        "use((x => class { y = x })(v)); var v = 1;",
+    ] {
+        test_same_options(source, &options);
+    }
+    // In `with (o)`, each read can call a getter for `o.v`.
+    test_same_options_source_type(
+        "function g(v) { with (o) use((x => x + x)(v)) } g(1);",
+        SourceType::cjs(),
+        &options,
     );
 }
 
 #[test]
 fn inline_iife_arguments_preserves_side_effects() {
-    test_smallest("(x => effect(x + 1))(1);", "(x => effect(2))(1);");
-    test_smallest(
-        "(x => effect(x + 1))((sideEffect(), 1));",
-        "(x => effect(2))((sideEffect(), 1));",
-    );
-    test_smallest("(x => x + 1)(1, sideEffect());", "(x => 2)(1, sideEffect());");
+    test_smallest("(x => effect(x + 1))(1);", "effect(2);");
+    test_smallest("(x => effect(x + 1))((sideEffect(), 1));", "sideEffect(), effect(2);");
+    test_smallest("(x => x + 1)(1, sideEffect());", "sideEffect();");
 
     // The type of a nonconstant argument is unknown; a mixed BigInt addition throws.
     test_smallest("(x => x + 1)(value);", "(x => x + 1)(value);");
-    test_smallest("(x => x + 1)(1n);", "(x => x + 1)(1n);");
+    test_smallest("(x => x + 1)(1n);", "1n + 1;");
     test_smallest("(x => x + 1)(Symbol());", "(x => x + 1)(Symbol());");
 
     let options = CompressOptions::smallest();
@@ -176,7 +232,7 @@ fn unmapped_parameters_allow_unused_writes() {
     );
     test_options_source_type(
         "(function (outer) { (a => { var a; console.log(a = 'foo', arguments[0]) })('bar') })('outer');",
-        "(function (outer) { (a => { console.log('foo', arguments[0]) })('bar') })('outer');",
+        "(function (outer) { console.log('foo', arguments[0]) })('outer');",
         SourceType::cjs(),
         &options,
     );

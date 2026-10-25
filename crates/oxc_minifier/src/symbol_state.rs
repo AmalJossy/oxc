@@ -70,6 +70,11 @@ impl<'a> SymbolState<'a> {
         self.values.get(symbol_id)?.as_ref()
     }
 
+    #[inline]
+    pub fn value_mut(&mut self, symbol_id: SymbolId) -> Option<&mut SymbolValue<'a>> {
+        self.values.get_mut(symbol_id)?.as_mut()
+    }
+
     pub fn set_function_summary(&mut self, symbol_id: SymbolId, summary: FunctionSummary) {
         self.persistent.entry(symbol_id).or_default().set_function_summary(summary);
     }
