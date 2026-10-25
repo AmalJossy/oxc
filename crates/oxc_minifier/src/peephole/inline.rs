@@ -1,5 +1,4 @@
 use crate::generated::ancestor::Ancestor;
-use oxc_allocator::{FromIn, GetAllocator};
 use oxc_ast::ast::*;
 use oxc_ecmascript::constant_evaluation::{ConstantEvaluation, ConstantValue};
 use oxc_span::GetSpan;
@@ -72,8 +71,7 @@ impl<'a> PeepholeOptimizations {
             } else if let Some(alias) = arrow_scope_id
                 .and_then(|scope_id| Self::iife_parameter_alias(symbol_id, argument, scope_id, ctx))
             {
-                ctx.init_value(symbol_id, None, FreshValueKind::None, false, false).iife_alias =
-                    Some(alias);
+                ctx.state.symbols.set_iife_alias(symbol_id, alias);
             } else {
                 wrapper_can_be_removed = false;
             }
@@ -85,10 +83,11 @@ impl<'a> PeepholeOptimizations {
         }
         for param in &params.items {
             let BindingPattern::BindingIdentifier(id) = &param.pattern else { unreachable!() };
-            if let Some(value) = ctx.state.symbols.value_mut(id.symbol_id()) {
+            let symbol_id = id.symbol_id();
+            if let Some(value) = ctx.state.symbols.value_mut(symbol_id) {
                 value.allow_constant_inlining = false;
-                value.iife_alias = None;
             }
+            ctx.state.symbols.remove_iife_alias(symbol_id);
         }
     }
 
@@ -99,7 +98,7 @@ impl<'a> PeepholeOptimizations {
         argument: &Expression<'a>,
         arrow_scope_id: ScopeId,
         ctx: &TraverseCtx<'a>,
-    ) -> Option<SymbolId> {
+    ) -> Option<BoundIdentifier<'a>> {
         let Expression::Identifier(ident) = argument else { return None };
         // An unresolved global can have a getter or throw a `ReferenceError`.
         // `identifier_read_blocks_reorder` also rejects writes, imports,
@@ -135,7 +134,7 @@ impl<'a> PeepholeOptimizations {
                     // A body or sibling-parameter binding can shadow the argument.
                     && scoping.find_binding(reference.scope_id(), ident.name) == Some(symbol_id)
             })
-            .then_some(symbol_id)
+            .then(|| BoundIdentifier::new(ident.name, symbol_id))
     }
 
     pub fn init_symbol_value(decl: &VariableDeclarator<'a>, ctx: &mut TraverseCtx<'a>) {
@@ -419,22 +418,20 @@ impl<'a> PeepholeOptimizations {
         let Expression::Identifier(ident) = expr else { return };
         let reference_id = ident.reference_id();
         let Some(symbol_id) = ctx.scoping().get_reference(reference_id).symbol_id() else { return };
-        let Some(symbol_value) = ctx.state.symbols.value(symbol_id) else {
-            return;
-        };
-        if let Some(alias) = symbol_value.iife_alias {
+        if let Some(alias) = ctx.state.symbols.iife_alias(symbol_id).cloned() {
             // The wrapper and its argument go away in a later pass. Until then,
             // the new read must count, or a single-use substitution can move the
             // argument's initializer into the argument and leave this read dangling.
-            if let Some(value) = ctx.state.symbols.value_mut(alias) {
+            if let Some(value) = ctx.state.symbols.value_mut(alias.symbol_id) {
                 value.references.record(ReferenceFlags::Read);
             }
-            let name = Ident::from_in(ctx.scoping().symbol_name(alias), ctx.allocator());
-            let new_expr =
-                BoundIdentifier::new(name, alias).create_spanned_read_expression(expr.span(), ctx);
+            let new_expr = alias.create_spanned_read_expression(expr.span(), ctx);
             ctx.replace_expression(expr, new_expr);
             return;
         }
+        let Some(symbol_value) = ctx.state.symbols.value(symbol_id) else {
+            return;
+        };
         if !symbol_value.can_inline_initialized_constant() {
             return;
         }

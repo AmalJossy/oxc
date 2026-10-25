@@ -1,5 +1,5 @@
 use oxc_ecmascript::constant_evaluation::ConstantValue;
-use oxc_syntax::{reference::ReferenceFlags, symbol::SymbolId};
+use oxc_syntax::reference::ReferenceFlags;
 
 /// The kind of fresh value a binding was initialized with, or `None` when the
 /// value may alias another binding (or is untracked).
@@ -89,10 +89,6 @@ pub struct SymbolValue<'a> {
     /// constants guide folding, but their arguments remain at the call site,
     /// so replacing bare reads would duplicate the argument's text.
     pub allow_constant_inlining: bool,
-
-    /// An IIFE parameter whose bare reads may be replaced with the argument
-    /// identifier. Set only when the IIFE wrapper can then be removed.
-    pub iife_alias: Option<SymbolId>,
 
     /// The `initialized_constant` originates from the implicit `undefined` of
     /// a declaration with no initializer, possibly through direct aliases.

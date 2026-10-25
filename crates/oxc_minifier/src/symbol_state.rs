@@ -13,6 +13,7 @@ use crate::{
     symbol_liveness::SymbolLiveness,
     symbol_metadata::{FunctionSummary, MemberWriteEffect, PersistentSymbolMetadata},
     symbol_value::SymbolValue,
+    traverse_context::BoundIdentifier,
 };
 
 /// Symbol-indexed data owned by the minifier.
@@ -20,6 +21,7 @@ use crate::{
 /// The fields stay separate because they have different storage and reset
 /// contracts:
 /// - `values` is dense scratch rebuilt for each peephole pass;
+/// - `iife_aliases` is sparse scratch rebuilt for each peephole pass;
 /// - `persistent` is sparse metadata retained across passes;
 /// - `liveness` is stable observability metadata plus optional graph results.
 pub struct SymbolState<'a> {
@@ -28,6 +30,9 @@ pub struct SymbolState<'a> {
     /// Sized once from `Scoping::symbols_len()`; no minifier pass mints new
     /// symbols, so indexed writes intentionally panic if that contract changes.
     values: IndexVec<SymbolId, Option<SymbolValue<'a>>>,
+    /// Per-pass scratch for the rare arrow IIFE parameters whose reads take
+    /// their identifier argument. Kept apart so `values` does not grow.
+    iife_aliases: FxHashMap<SymbolId, BoundIdentifier<'a>>,
     persistent: FxHashMap<SymbolId, PersistentSymbolMetadata>,
     liveness: Option<SymbolLiveness<'a>>,
 }
@@ -43,6 +48,7 @@ impl<'a> SymbolState<'a> {
         values.resize_with(scoping.symbols_len(), || None);
         Self {
             values,
+            iife_aliases: FxHashMap::default(),
             persistent: FxHashMap::default(),
             liveness: SymbolLiveness::new_if_enabled(source_type, options, scoping, allocator),
         }
@@ -54,6 +60,7 @@ impl<'a> SymbolState<'a> {
         for value in &mut self.values {
             *value = None;
         }
+        self.iife_aliases.clear();
     }
 
     #[inline]
@@ -73,6 +80,18 @@ impl<'a> SymbolState<'a> {
     #[inline]
     pub fn value_mut(&mut self, symbol_id: SymbolId) -> Option<&mut SymbolValue<'a>> {
         self.values.get_mut(symbol_id)?.as_mut()
+    }
+
+    pub fn set_iife_alias(&mut self, symbol_id: SymbolId, alias: BoundIdentifier<'a>) {
+        self.iife_aliases.insert(symbol_id, alias);
+    }
+
+    pub fn remove_iife_alias(&mut self, symbol_id: SymbolId) {
+        self.iife_aliases.remove(&symbol_id);
+    }
+
+    pub fn iife_alias(&self, symbol_id: SymbolId) -> Option<&BoundIdentifier<'a>> {
+        self.iife_aliases.get(&symbol_id)
     }
 
     pub fn set_function_summary(&mut self, symbol_id: SymbolId, summary: FunctionSummary) {
